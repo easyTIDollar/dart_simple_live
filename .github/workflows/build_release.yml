@@ -1,4 +1,27 @@
-- name: Sync Upstream
+name: Auto Sync and Release
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # 每天自动运行一次，检查原项目是否有更新
+  workflow_dispatch: # 允许随时在 Actions 面板手动点击运行
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Sync from Upstream
+    runs-on: ubuntu-latest
+    outputs:
+      has_updates: ${{ steps.sync.outputs.has_updates }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: master # 明确拉取 master 分支
+
+      - name: Sync Upstream
         id: sync
         run: |
           git config --global user.name "GitHub Action"
@@ -10,7 +33,7 @@
           git checkout master
           LOCAL_HASH=$(git rev-parse HEAD)
           
-          # 关键修改：合并原作者的 master 分支
+          # 合并原作者的 master 分支
           if git merge upstream/master; then
             # 记录合并后的版本号
             NEW_HASH=$(git rev-parse HEAD)
@@ -27,3 +50,112 @@
             echo "Merge conflict or error"
             exit 1
           fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: sync
+    # 只有当检测到代码有更新，或者你手动点击运行时，才开始编译
+    if: needs.sync.outputs.has_updates == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # 确保 Android 和 Windows 独立编译，互不连累
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: Android
+            build_cmd: flutter build apk --release --build-name=1.0.0 --build-number=$(date +%s)
+          - os: windows-latest
+            target: Windows
+            build_cmd: flutter build windows --release
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: master # 确保编译的是刚同步完最新代码的 master 分支
+
+      - name: Setup Java (For Android)
+        if: matrix.target == 'Android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Mock Local Properties & Keystore (For Android)
+        if: matrix.target == 'Android'
+        working-directory: ./simple_live_app
+        run: |
+          mkdir -p android/app
+          
+          # 1. 补齐缺失的版本号信息，防止 local.properties 读取 null
+          echo "flutter.versionCode=1" > android/local.properties
+          echo "flutter.versionName=1.0.0" >> android/local.properties
+          
+          # 2. 生成一个临时的 keystore 签名证书
+          keytool -genkey -v -keystore ${{ github.workspace }}/simple_live_app/android/app/dummy.jks -keyalg RSA -keysize 2048 -validity 10000 -alias dummy -storepass dummy123 -keypass dummy123 -dname "CN=GitHub Actions"
+          
+          # 3. 补齐 release 签名配置文件 (key.properties)
+          echo "storePassword=dummy123" > android/key.properties
+          echo "keyPassword=dummy123" >> android/key.properties
+          echo "keyAlias=dummy" >> android/key.properties
+          echo "storeFile=${{ github.workspace }}/simple_live_app/android/app/dummy.jks" >> android/key.properties
+
+      - name: Enable Windows Desktop
+        if: matrix.target == 'Windows'
+        run: flutter config --enable-windows-desktop
+
+      - name: Get dependencies
+        working-directory: ./simple_live_app
+        run: flutter pub get
+
+      - name: Build ${{ matrix.target }}
+        working-directory: ./simple_live_app
+        run: ${{ matrix.build_cmd }}
+
+      - name: Compress Windows Build
+        if: matrix.target == 'Windows'
+        run: Compress-Archive -Path simple_live_app/build/windows/x64/runner/Release/* -DestinationPath simple_live_windows.zip
+
+      - name: Upload Android APK
+        if: matrix.target == 'Android'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: simple_live_app/build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Upload Windows ZIP
+        if: matrix.target == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: simple_live_windows.zip
+
+  release:
+    name: Create Auto Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Generate Tag Name
+        id: tag
+        # 动态生成类似 auto-2026.05.06-1230 的版本号，确保每次发版独立
+        run: echo "tag_name=auto-$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
+
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag_name }}
+          name: "自动同步与构建 - ${{ steps.tag.outputs.tag_name }}"
+          body: |
+            本项目通过 GitHub Actions 自动拉取原作者 `xiaoyaocz` 的最新代码并完成编译。
+            包含了最新的 Android 和 Windows 客户端安装包。
+          files: |
+            android-apk/app-release.apk
+            windows-zip/simple_live_windows.zip
