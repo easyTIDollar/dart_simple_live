@@ -1,26 +1,4 @@
-name: Auto Sync and Release
-
-on:
-  schedule:
-    - cron: '0 0 * * *' # 每天北京时间上午 8 点自动检查更新
-  workflow_dispatch: # 保留手动触发按钮
-
-permissions:
-  contents: write
-
-jobs:
-  sync:
-    name: Sync from Upstream
-    runs-on: ubuntu-latest
-    outputs:
-      has_updates: ${{ steps.sync.outputs.has_updates }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Sync Upstream
+- name: Sync Upstream
         id: sync
         run: |
           git config --global user.name "GitHub Action"
@@ -28,10 +6,18 @@ jobs:
           git remote add upstream https://github.com/xiaoyaocz/dart_simple_live.git
           git fetch upstream
           
-          # 检查是否有更新
-          if git merge upstream/main; then
-            if [ -n "$(git status --porcelain)" ]; then
-              git push origin main
+          # 确保当前在 master 分支，并记录合并前本地的版本号 (Hash)
+          git checkout master
+          LOCAL_HASH=$(git rev-parse HEAD)
+          
+          # 关键修改：合并原作者的 master 分支
+          if git merge upstream/master; then
+            # 记录合并后的版本号
+            NEW_HASH=$(git rev-parse HEAD)
+            
+            # 对比版本号：如果不一致，说明成功拉取到了新代码
+            if [ "$LOCAL_HASH" != "$NEW_HASH" ]; then
+              git push origin master
               echo "has_updates=true" >> $GITHUB_OUTPUT
             else
               echo "No new commits to push."
@@ -41,55 +27,3 @@ jobs:
             echo "Merge conflict or error"
             exit 1
           fi
-
-  build:
-    name: Build ${{ matrix.target }}
-    needs: sync
-    if: needs.sync.outputs.has_updates == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: Android
-            build_cmd: flutter build apk --release --build-name=1.0.0 --build-number=$(date +%s)
-          - os: windows-latest
-            target: Windows
-            build_cmd: flutter build windows --release
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      # ... (此处保留之前为你提供的 Setup Flutter, Java 和 Mock 签名文件的所有步骤) ...
-      # ⚠️ 注意：请务必保留之前那段 'Mock Local Properties & Keystore' 步骤，否则安卓编译还会报错。
-
-      - name: Build ${{ matrix.target }}
-        working-directory: ./simple_live_app
-        run: ${{ matrix.build_cmd }}
-
-      # ... (此处保留 Upload Artifacts 步骤) ...
-
-  release:
-    name: Create Auto Release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Generate Tag Name
-        id: tag
-        run: echo "tag_name=auto-$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag_name }}
-          name: "自动构建更新 - ${{ steps.tag.outputs.tag_name }}"
-          body: |
-            这是根据原项目最新代码自动编译的版本。
-            构建时间: ${{ github.event.repository.updated_at }}
-          files: |
-            android-apk/app-release.apk
-            windows-zip/simple_live_windows.zip
