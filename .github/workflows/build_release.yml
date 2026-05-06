@@ -3,8 +3,8 @@ name: Build and Release
 on:
   push:
     tags:
-      - 'v*' # 推送类似 v1.0.0 的 Tag 时自动触发发布
-  workflow_dispatch: # 允许在 Actions 页面手动触发编译
+      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -14,11 +14,12 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false # 确保 Android 和 Windows 独立构建，互不连累
       matrix:
         include:
           - os: ubuntu-latest
             target: Android
-            build_cmd: flutter build apk --release
+            build_cmd: flutter build apk --release --build-name=1.0.0 --build-number=1
           - os: windows-latest
             target: Windows
             build_cmd: flutter build windows --release
@@ -38,6 +39,25 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
+
+      - name: Mock Local Properties & Keystore (For Android)
+        if: matrix.target == 'Android'
+        working-directory: ./simple_live_app
+        run: |
+          mkdir -p android/app
+          
+          # 1. 补齐缺失的版本号信息，防止 local.properties 读取 null
+          echo "flutter.versionCode=1" > android/local.properties
+          echo "flutter.versionName=1.0.0" >> android/local.properties
+          
+          # 2. 生成一个临时的 keystore 签名证书
+          keytool -genkey -v -keystore ${{ github.workspace }}/simple_live_app/android/app/dummy.jks -keyalg RSA -keysize 2048 -validity 10000 -alias dummy -storepass dummy123 -keypass dummy123 -dname "CN=GitHub Actions"
+          
+          # 3. 补齐 release 签名配置文件 (key.properties)
+          echo "storePassword=dummy123" > android/key.properties
+          echo "keyPassword=dummy123" >> android/key.properties
+          echo "keyAlias=dummy" >> android/key.properties
+          echo "storeFile=${{ github.workspace }}/simple_live_app/android/app/dummy.jks" >> android/key.properties
 
       - name: Enable Windows Desktop
         if: matrix.target == 'Windows'
